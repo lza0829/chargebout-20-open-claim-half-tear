@@ -1,6 +1,5 @@
 from __future__ import annotations
 from datetime import datetime, timedelta
-from app.services import claim_surface
 
 from app.config import LEDGER_POLICY
 from app.db import db, row_dict, rows
@@ -171,10 +170,4 @@ def session_detail(conn, session_id: int):
     d["脉冲"] = pulses
     d["事件"] = events
     return d
-
-_overview_impl = overview
-
-
-def overview(conn):
-    return claim_surface.overlay_overview(_overview_impl(conn), conn)
 

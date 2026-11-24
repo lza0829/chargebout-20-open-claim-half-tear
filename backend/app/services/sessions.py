@@ -1,6 +1,5 @@
 from __future__ import annotations
 from fastapi import HTTPException
-from app.services import claim_surface
 
 from app.config import HOLDER_STATUSES
 from app.services.core import current_band_price, get_setting, is_day_sealed, now_str, today
@@ -249,7 +248,10 @@ def abort_session(conn, session_id: int, reason: str = "急停") -> dict:
 
 
 def set_pile_status(conn, pile_id: int, status: str) -> dict:
-    if status not in ("空闲", "占用", "故障", "维护"):
+    if status == "占用":
+        # 占用钉由开充事务同笔钉、由结算/急停同笔拔，禁止旁路改占用钉字
+        raise HTTPException(400, detail="占用钉只能由开充/结算/急停事务改写，禁止旁路改钉")
+    if status not in ("空闲", "故障", "维护"):
         raise HTTPException(400, detail="非法桩位状态")
     pile = conn.execute("SELECT * FROM piles WHERE id=?", (pile_id,)).fetchone()
     if not pile:
@@ -265,11 +267,4 @@ def set_pile_status(conn, pile_id: int, status: str) -> dict:
         raise HTTPException(400, detail="仍有未终结会话占用，不可手工改空闲")
     conn.execute("UPDATE piles SET status=? WHERE id=?", (status, pile_id))
     return {"桩位编号": pile_id, "状态": status}
-
-_open_session_impl = open_session
-
-
-def open_session(*args, **kwargs):
-    out = _open_session_impl(*args, **kwargs)
-    return claim_surface.after_open(args[0] if args else None, out, *args[1:], **kwargs)
 

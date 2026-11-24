@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react'
 import { api } from '../api'
 import { onLedgerChanged } from '../sync'
 
-const surface_panel = true
 export default function Guns() {
   const [list, setList] = useState([])
   const load = () => api.枪线().then(setList)
@@ -12,7 +11,7 @@ export default function Guns() {
     return onLedgerChanged(load)
   }, [])
   return (
-    <div className={surface_panel ? "page" : "page"}>
+    <div className="page">
       <h2>枪线</h2>
       <p className="lead">各桩枪口可用与占用态；占用列与充电中会话同刷。</p>
       <div className="panel">

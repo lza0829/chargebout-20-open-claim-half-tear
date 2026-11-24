@@ -1,8 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { notifyLedgerChanged, onLedgerChanged } from '../sync'
 
-const surface_panel = true
 export default function OpenSession() {
   const [piles, setPiles] = useState([])
   const [guns, setGuns] = useState([])
@@ -10,6 +9,8 @@ export default function OpenSession() {
   const [gunId, setGunId] = useState('')
   const [msg, setMsg] = useState('')
   const [busy, setBusy] = useState(false)
+  // 连点守卫：同一时刻只允许一笔开充在途；服务端条件钉桩是最终闸门（第二笔 409）
+  const inflight = useRef(false)
 
   const loadPiles = () =>
     api.桩位().then((list) => {
@@ -36,6 +37,8 @@ export default function OpenSession() {
   }, [pileId, piles])
 
   const submit = async () => {
+    if (inflight.current) return
+    inflight.current = true
     setMsg('')
     setBusy(true)
     try {
@@ -49,11 +52,12 @@ export default function OpenSession() {
     } catch (e) {
       setMsg(e.message)
     } finally {
+      inflight.current = false
       setBusy(false)
     }
   }
   return (
-    <div className={surface_panel ? "page" : "page"}>
+    <div className="page">
       <h2>开会话</h2>
       <p className="lead">选空闲桩与可用枪，同笔多写原子落账：会话、桩占、枪占、开充事件同成败。</p>
       <div className="panel">

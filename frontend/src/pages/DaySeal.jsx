@@ -1,13 +1,15 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
+import { onLedgerChanged } from '../sync'
 
-const surface_panel = true
 export default function DaySeal() {
   const [d, setD] = useState(null)
   const [msg, setMsg] = useState('')
   const load = () => api.充日().then(setD)
   useEffect(() => {
     load()
+    // 开充/结算/急停落账后，未结会话数与全站同刷
+    return onLedgerChanged(load)
   }, [])
   const seal = async () => {
     try {
@@ -27,7 +29,7 @@ export default function DaySeal() {
   }
   if (!d) return null
   return (
-    <div className={surface_panel ? "page" : "page"}>
+    <div className="page">
       <h2>充日封印</h2>
       <p className="lead">营业日封印后默认禁止新开充；未结会话数仅供参考。</p>
       <div className="panel">

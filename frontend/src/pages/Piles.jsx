@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react'
 import { api } from '../api'
 import { notifyLedgerChanged, onLedgerChanged } from '../sync'
 
-const surface_panel = true
 export default function Piles() {
   const [list, setList] = useState([])
   const [msg, setMsg] = useState('')
@@ -23,7 +22,7 @@ export default function Piles() {
     }
   }
   return (
-    <div className={surface_panel ? "page" : "page"}>
+    <div className="page">
       <h2>桩位</h2>
       <p className="lead">场站下桩位名册与空闲占用故障维护态；占用列与充电中会话同刷。</p>
       <div className="panel">

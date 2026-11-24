@@ -7,6 +7,14 @@
 3. 多写中途被人为打断：整笔回滚到开充前快照；
 4. 并发开充与急停：不出现假绿（桩空闲却有未终结会话），最终态自洽；
 5. 读路径占用可由选定落账次序（事件流水）重放复现。
+
+五个开充夹具（test_09 起）：
+F1 双钉只成一侧 —— 枪钉失败整笔回滚，不留半截占用；
+F2 会话行有双钉空 —— 漂移被显式标红，不伪装已对齐；
+F3 事件成功总览未加 —— 回执/会话行/双钉/事件/总览桶同命运；
+F4 开充急停交错半截 —— 见 test_04，任意交错后终态自洽；
+F5 连点开充一笔幽灵占用 —— 见 test_02 并发版与 test_12 顺序版；
+另含：脉冲入口误触不加脏电量、旁路改占用钉被拒、假多写落账层收口清零。
 """
 from __future__ import annotations
 
@@ -298,6 +306,229 @@ class LedgerTests(unittest.TestCase):
                     conn.execute("SELECT 1")
                     raise RuntimeError("体内失败")
         self.assertEqual(state2["begin"], 1, "体内失败不得触发取锁重试")
+
+    # —— 夹具 F1：双钉只成一侧 —— 枪钉失败必须整笔回滚，不留半截占用 ——
+    def test_09_fixture_one_sided_pin_rolls_back_entirely(self):
+        with tx() as conn:
+            pile_id, gun_id = _first_pile_gun(conn)
+            # 让该桩全部枪线进入故障态：钉桩可成、钉枪必败
+            conn.execute(
+                "UPDATE guns SET status='故障' WHERE pile_id=?", (pile_id,)
+            )
+        before = self._snapshot()
+
+        # 显式枪线开充：钉枪条件不满足 → 409，整笔回滚
+        with self.assertRaises(HTTPException) as cm:
+            with tx() as conn:
+                svc.open_session(conn, pile_id, gun_id)
+        self.assertEqual(cm.exception.status_code, 409)
+
+        # 自动选枪开充：无可用枪线 → 400，同样整笔回滚
+        with self.assertRaises(HTTPException) as cm2:
+            with tx() as conn:
+                svc.open_session(conn, pile_id)
+        self.assertEqual(cm2.exception.status_code, 400)
+
+        after = self._snapshot()
+        self.assertEqual(after["piles"][pile_id], "空闲", "桩钉必须随整笔回滚，不得只成一侧")
+        self.assertEqual(after["guns"][gun_id], "故障", "枪态须回到开充前快照")
+        self.assertEqual(after["sessions"], before["sessions"], "不得残留会话行")
+        self.assertEqual(after["events"], before["events"], "不得残留半截开充事件")
+        with tx() as conn:
+            self.assertEqual(drift_counts(conn), {"桩位漂移数": 0, "枪线漂移数": 0})
+            # 恢复枪线可用，供后续用例使用
+            conn.execute(
+                "UPDATE guns SET status='可用' WHERE pile_id=?", (pile_id,)
+            )
+
+    # —— 夹具 F2：会话行有双钉空 —— 漂移必须显式标红，不得伪装已对齐 ——
+    def test_10_fixture_session_row_with_empty_pins_is_flagged(self):
+        with tx() as conn:
+            pile_id, gun_id = _first_pile_gun(conn)
+        r = _open(pile_id)
+        # 注入漂移：会话行仍是充电中，双钉却被掏空
+        with tx() as conn:
+            conn.execute("UPDATE piles SET status='空闲' WHERE id=?", (pile_id,))
+            conn.execute("UPDATE guns SET status='可用' WHERE id=?", (gun_id,))
+        with tx() as conn:
+            drift = drift_counts(conn)
+            rep = replay_occupancy(conn)
+            o = overview(conn)
+        self.assertGreaterEqual(drift["桩位漂移数"], 1, "桩钉空必须计入漂移")
+        self.assertGreaterEqual(drift["枪线漂移数"], 1, "枪钉空必须计入漂移")
+        self.assertIn(pile_id, rep["桩位不一致编号"])
+        self.assertIn(gun_id, rep["枪线不一致编号"])
+        self.assertFalse(rep["一致"], "重放必须识别双钉空")
+        self.assertGreaterEqual(o["桩位漂移数"], 1, "总览须显式标红桩漂移")
+        self.assertGreaterEqual(o["枪线漂移数"], 1, "总览须显式标红枪漂移")
+        # 恢复双钉后正常急停回收，不得污染其它用例
+        with tx() as conn:
+            conn.execute("UPDATE piles SET status='占用' WHERE id=?", (pile_id,))
+            conn.execute("UPDATE guns SET status='占用' WHERE id=?", (gun_id,))
+            svc.abort_session(conn, r["会话编号"], "测试回收")
+        with tx() as conn:
+            self.assertEqual(drift_counts(conn), {"桩位漂移数": 0, "枪线漂移数": 0})
+
+    # —— 夹具 F3：事件成功总览未加 —— 回执/会话行/双钉/事件/总览桶须同命运 ——
+    def test_11_fixture_event_and_overview_bucket_share_fate(self):
+        with tx() as conn:
+            pile_id, gun_id = _first_pile_gun(conn)
+            before = overview(conn)
+        r = _open(pile_id)
+        self.assertEqual(r["状态"], "充电中")
+        self.assertFalse(any(k.startswith("surface") for k in r), "回执不得夹带刷漆层字段")
+        with tx() as conn:
+            se = conn.execute(
+                "SELECT status FROM sessions WHERE id=?", (r["会话编号"],)
+            ).fetchone()
+            ev = conn.execute(
+                "SELECT id FROM session_events WHERE session_id=? AND action='开会话'",
+                (r["会话编号"],),
+            ).fetchone()
+            pile = conn.execute("SELECT status FROM piles WHERE id=?", (pile_id,)).fetchone()
+            gun = conn.execute("SELECT status FROM guns WHERE id=?", (gun_id,)).fetchone()
+            after = overview(conn)
+            real_open = conn.execute(
+                "SELECT COUNT(*) AS c FROM sessions WHERE status='充电中'"
+            ).fetchone()["c"]
+        # 同命运：回执绿灯 ⟺ 会话行充电中 ⟺ 双钉占用 ⟺ 开充事件在册
+        self.assertEqual(se["status"], "充电中")
+        self.assertIsNotNone(ev, "开充事件必须与回执同命运")
+        self.assertEqual(pile["status"], "占用")
+        self.assertEqual(gun["status"], "占用")
+        # 总览充电中桶必须随落账加一，且恒等于真实会话计数（非刷漆常数）
+        self.assertEqual(after["充电中"], before["充电中"] + 1, "事件成功总览桶必须同加")
+        self.assertEqual(after["充电中"], real_open)
+        self.assertEqual(after["桩位占用"], before["桩位占用"] + 1)
+        self.assertFalse(any(k.startswith("surface") for k in after), "总览不得夹带刷漆层字段")
+        # 急停回退后桶必须同减，对账可重放
+        _abort(r["会话编号"])
+        with tx() as conn:
+            back = overview(conn)
+            self.assertEqual(back["充电中"], before["充电中"])
+            self.assertEqual(back["桩位占用"], before["桩位占用"])
+            self.assertTrue(replay_occupancy(conn)["一致"])
+
+    # —— 夹具 F5（顺序版）：连点开充 —— 第二笔 409，不得留幽灵占用 ——
+    def test_12_fixture_rapid_double_click_no_ghost_occupancy(self):
+        with tx() as conn:
+            pile_id, _ = _first_pile_gun(conn)
+        r = _open(pile_id)
+        # 连点第二笔：同一桩立即再开 → 必须 409 而非半截成功
+        with self.assertRaises(HTTPException) as cm:
+            _open(pile_id)
+        self.assertEqual(cm.exception.status_code, 409)
+        with tx() as conn:
+            holders = conn.execute(
+                "SELECT COUNT(*) AS c FROM sessions WHERE pile_id=? AND status IN ('充电中','结算中','已超时')",
+                (pile_id,),
+            ).fetchone()["c"]
+            opens = conn.execute(
+                "SELECT COUNT(*) AS c FROM session_events WHERE session_id=? AND action='开会话'",
+                (r["会话编号"],),
+            ).fetchone()["c"]
+            pile = conn.execute("SELECT status FROM piles WHERE id=?", (pile_id,)).fetchone()
+            self.assertEqual(drift_counts(conn), {"桩位漂移数": 0, "枪线漂移数": 0})
+        self.assertEqual(holders, 1, "连点只能成交一笔，不得双终态挂账")
+        self.assertEqual(opens, 1, "开充事件只能有一条，不得幽灵复写")
+        self.assertEqual(pile["status"], "占用")
+        _abort(r["会话编号"])
+        with tx() as conn:
+            self.assertEqual(drift_counts(conn), {"桩位漂移数": 0, "枪线漂移数": 0})
+
+    # —— 脉冲入口误触：已终结会话不得继续加脏电量 ——
+    def test_13_pulse_on_terminated_session_adds_no_dirty_kwh(self):
+        with tx() as conn:
+            pile_id, _ = _first_pile_gun(conn)
+        r = _open(pile_id)
+        _abort(r["会话编号"])  # 急停终结
+        with self.assertRaises(HTTPException) as cm:
+            with tx() as conn:
+                svc.add_pulse(conn, r["会话编号"], 2.5, 7)
+        self.assertEqual(cm.exception.status_code, 400)
+        with tx() as conn:
+            se = conn.execute(
+                "SELECT kwh, amount FROM sessions WHERE id=?", (r["会话编号"],)
+            ).fetchone()
+            pulses = conn.execute(
+                "SELECT COUNT(*) AS c FROM pulses WHERE session_id=?", (r["会话编号"],)
+            ).fetchone()["c"]
+            pulse_events = conn.execute(
+                "SELECT COUNT(*) AS c FROM session_events WHERE session_id=? AND action='脉冲'",
+                (r["会话编号"],),
+            ).fetchone()["c"]
+        self.assertEqual(float(se["kwh"]), 0.0, "误触不得加脏电量")
+        self.assertEqual(pulses, 0)
+        self.assertEqual(pulse_events, 0, "误触不得留脉冲事件")
+
+        # 已关账同样拒绝误触
+        with tx() as conn:
+            pile_id2, _ = _first_pile_gun(conn)
+        r2 = _open(pile_id2)
+        with tx() as conn:
+            svc.settle(conn, r2["会话编号"])
+        with self.assertRaises(HTTPException) as cm2:
+            with tx() as conn:
+                svc.add_pulse(conn, r2["会话编号"], 1.0, 7)
+        self.assertEqual(cm2.exception.status_code, 400)
+        with tx() as conn:
+            self.assertTrue(replay_occupancy(conn)["一致"])
+
+    # —— 旁路改占用钉字：占用钉只能由开充/结算/急停事务改写 ——
+    def test_14_manual_occupancy_pin_is_forbidden(self):
+        with tx() as conn:
+            pile_id, _ = _first_pile_gun(conn)
+            with self.assertRaises(HTTPException) as cm:
+                svc.set_pile_status(conn, pile_id, "占用")
+            self.assertEqual(cm.exception.status_code, 400)
+            with self.assertRaises(HTTPException):
+                svc.set_pile_status(conn, pile_id, "爆炸")
+        with tx() as conn:
+            pile = conn.execute("SELECT status FROM piles WHERE id=?", (pile_id,)).fetchone()
+            self.assertEqual(pile["status"], "空闲", "旁路改钉不得生效")
+            self.assertEqual(drift_counts(conn), {"桩位漂移数": 0, "枪线漂移数": 0})
+
+    # —— 假多写落账收口：刷漆层清零，历史残漆启动即除，全链路只认原子多写 ——
+    def test_15_fake_multiwrite_surface_is_closed_out(self):
+        import importlib.util
+
+        self.assertIsNone(
+            importlib.util.find_spec("app.services.claim_surface"),
+            "刷漆层模块必须整体移除，全局只留同笔多写原子落账",
+        )
+        # 模拟历史库已被刷漆：残漆须在 init_db 时被幂等清除
+        with tx() as conn:
+            conn.execute(
+                "INSERT INTO settings(key,value) VALUES('surface_last','{\"ok\": true, \"充电中\": 1}') "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+            )
+            conn.execute(
+                "INSERT INTO settings(key,value) VALUES('surface_ok','1') "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+            )
+        init_db()
+        with tx() as conn:
+            residue = conn.execute(
+                "SELECT COUNT(*) AS c FROM settings WHERE key LIKE 'surface%'"
+            ).fetchone()["c"]
+        self.assertEqual(residue, 0, "历史残漆必须被清除，不得再覆盖总览")
+        # 开充→脉冲→结算全链路走完后，回执/总览/settings 均无刷漆痕迹
+        with tx() as conn:
+            pile_id, _ = _first_pile_gun(conn)
+        r = _open(pile_id)
+        self.assertFalse(any(k.startswith("surface") for k in r))
+        with tx() as conn:
+            svc.add_pulse(conn, r["会话编号"], 1.5, 7)
+            svc.settle(conn, r["会话编号"])
+            o = overview(conn)
+            residue = conn.execute(
+                "SELECT COUNT(*) AS c FROM settings WHERE key LIKE 'surface%'"
+            ).fetchone()["c"]
+        self.assertFalse(any(k.startswith("surface") for k in o))
+        self.assertEqual(residue, 0)
+        with tx() as conn:
+            self.assertEqual(drift_counts(conn), {"桩位漂移数": 0, "枪线漂移数": 0})
+            self.assertTrue(replay_occupancy(conn)["一致"])
 
 
 if __name__ == "__main__":

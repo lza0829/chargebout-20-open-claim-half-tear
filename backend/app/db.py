@@ -162,6 +162,10 @@ def tx() -> _ImmediateTx:
 def init_db() -> None:
     with db() as conn:
         conn.executescript(SCHEMA)
+        # 收口假多写落账：历代刷漆层可能已在 settings 留下假绿缓存
+        # （surface_last/surface_ok），启动时幂等清除，保证总览桶与审计
+        # 只认真实落账重放，不被历史残漆覆盖
+        conn.execute("DELETE FROM settings WHERE key IN ('surface_last','surface_ok')")
 
 
 def row_dict(row: sqlite3.Row | None) -> dict | None:

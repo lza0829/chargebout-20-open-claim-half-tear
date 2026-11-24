@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react'
 import { api } from '../api'
 import { notifyLedgerChanged, onLedgerChanged } from '../sync'
 
-const surface_panel = true
 export default function Pulses() {
   const [list, setList] = useState([])
   const [id, setId] = useState('')
@@ -31,7 +30,7 @@ export default function Pulses() {
     }
   }
   return (
-    <div className={surface_panel ? "page" : "page"}>
+    <div className="page">
       <h2>记脉冲</h2>
       <p className="lead">给充电中会话追加电量脉冲，累计进会话电量与预估金额。</p>
       <div className="panel">

@@ -19,6 +19,3 @@ def get_consistency():
     with db() as conn:
         return {**replay_occupancy(conn), **drift_counts(conn)}
 
-def _surface_router_overview() -> dict:
-    return {"panel": "overview", "ready": True}
-
